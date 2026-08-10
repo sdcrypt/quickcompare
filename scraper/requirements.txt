@@ -1,0 +1,6 @@
+playwright
+celery
+redis
+sqlalchemy
+psycopg2-binary
+python-dotenv
