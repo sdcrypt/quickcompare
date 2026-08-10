@@ -1,18 +1,23 @@
 """
-Celery worker — the background process that actually runs the scraper.
+Celery worker — the background process that runs all scrapers.
 
 This file lives in the 'scraper' Docker container and runs continuously,
 waiting for jobs to appear in the Redis queue. When the backend sends a
-"scrape this product" task, this worker picks it up and does the work.
+"scrape this product" task, this worker picks it up and does the actual work.
 
 How it fits into the bigger picture:
     Backend  →  drops a task into Redis  →  this worker picks it up
-             →  runs the Blinkit scraper  →  saves products to the database
-             →  updates the scrape_logs table so the frontend knows it's done
+             →  runs the right scraper   →  saves products to the database
+             →  updates scrape_logs so the frontend knows the job is done
 
-The task name "scraper.worker.scrape_blinkit" must match exactly what the
-backend sends in celery_app.send_task(...). If they don't match, the task
-will sit in the queue forever and nothing will happen.
+Adding a new platform:
+    1. Create a new scraper file (e.g. instamart.py) with a scrape_search() function.
+    2. Add a 3-line task at the bottom of this file following the same pattern
+       as scrape_blinkit and scrape_zepto below.
+    3. That's it — the shared _run_scrape() helper handles all the DB work.
+
+Task names must match exactly what the backend sends in send_task(...).
+If they don't match, the task sits in the queue forever and nothing happens.
 """
 
 import asyncio
@@ -24,50 +29,81 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-# Load DATABASE_URL and REDIS_URL from the .env file
 load_dotenv()
 
 REDIS_URL    = os.getenv("REDIS_URL",    "redis://redis:6379/0")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Set up Celery using Redis as both the message queue and the result store
+# Celery app — connects to Redis to receive tasks
 app = Celery("quickcompare", broker=REDIS_URL, backend=REDIS_URL)
 
-# Set up a direct database connection (separate from the backend's connection)
+# Direct database connection for this worker process
 engine       = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
 
-# ── The main task ─────────────────────────────────────────────────────────────
+# ── Platform tasks ────────────────────────────────────────────────────────────
+# Each task is just a thin wrapper that imports the right scraper and calls
+# the shared _run_scrape() helper. All the heavy lifting is done there.
 
 @app.task(name="scraper.worker.scrape_blinkit")
 def scrape_blinkit(query: str, job_id: str):
     """
     Background task: scrape Blinkit for 'query' and save the results.
 
-    This is called automatically by Celery when the backend sends a task.
-    It should never be called directly.
+    Called automatically by Celery — do not call this directly.
+    The job_id links back to a row in scrape_logs so the frontend can
+    track progress.
+    """
+    from blinkit import scrape_search
+    _run_scrape(query, job_id, scrape_search, platform="blinkit")
+
+
+@app.task(name="scraper.worker.scrape_zepto")
+def scrape_zepto(query: str, job_id: str):
+    """
+    Background task: scrape Zepto for 'query' and save the results.
+
+    Called automatically by Celery — do not call this directly.
+    Follows the exact same flow as scrape_blinkit, just uses the
+    Zepto scraper instead.
+    """
+    from zepto import scrape_search
+    _run_scrape(query, job_id, scrape_search, platform="zepto")
+
+
+# ── Shared scrape runner ──────────────────────────────────────────────────────
+
+def _run_scrape(query: str, job_id: str, scraper_fn, platform: str):
+    """
+    Shared logic that every platform task uses.
 
     Steps:
-        1. Mark the job as "running" in the database.
-        2. Run the Blinkit scraper (opens a browser, searches, collects data).
-        3. Save each product to the 'products' table.
-        4. Mark the job as "completed" with a count of how many items were found.
+        1. Mark the job as "running" so the frontend shows a loading state.
+        2. Call the platform's scrape_search() function to collect products.
+        3. Save every product to the 'products' table.
+        4. Mark the job as "completed" with the count of products saved.
 
-    If anything goes wrong at any step, the error is caught, logged, and
-    the job is marked as "failed" so the frontend can show a helpful message.
+    If anything fails at any step, the error is caught, any half-written
+    data is rolled back, and the job is marked "failed" with the error
+    message so the frontend can show something useful.
+
+    Args:
+        query      - The product the user searched for, e.g. "amul milk".
+        job_id     - The unique tracking ID for this job.
+        scraper_fn - The scrape_search() function from the platform module.
+        platform   - Human-readable name used in log messages, e.g. "zepto".
     """
-    from blinkit import scrape_search  # imported here so the worker starts up faster
-
     db = SessionLocal()
     try:
-        # Tell the frontend we've started
+        # Step 1: Tell the frontend we've started
         _update_log(db, job_id, status="running")
 
-        # Open a browser and scrape Blinkit
-        products = asyncio.run(scrape_search(query))
+        # Step 2: Open a browser and collect product data
+        products = asyncio.run(scraper_fn(query))
+        print(f"[worker:{platform}] collected {len(products)} products for '{query}'")
 
-        # Save every product to the database
+        # Step 3: Save each product to the database
         now = datetime.utcnow()
         for p in products:
             db.execute(
@@ -82,33 +118,34 @@ def scrape_blinkit(query: str, job_id: str):
                 {**p, "scraped_at": now},
             )
 
-        # Mark the job as done and record how many products were saved
+        # Step 4: Mark the job as done
         _update_log(db, job_id, status="completed", items_count=len(products))
         db.commit()
-        print(f"[worker] scraped {len(products)} products for '{query}'")
 
     except Exception as exc:
-        # Something went wrong — roll back any partial saves and record the error
+        # Something went wrong — undo any partial writes and record the error
         db.rollback()
         _update_log(db, job_id, status="failed", error=str(exc))
         db.commit()
-        print(f"[worker] failed for '{query}': {exc}")
+        print(f"[worker:{platform}] failed for '{query}': {exc}")
     finally:
         db.close()
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+# ── DB log helper ─────────────────────────────────────────────────────────────
 
 def _update_log(db, job_id: str, **kwargs):
     """
-    Update a row in the scrape_logs table for the given job_id.
+    Update one or more columns in scrape_logs for the given job_id.
 
-    Any keyword argument passed in becomes a column update.
-    For example: _update_log(db, job_id, status="running")
-    automatically sets finished_at to the current time when the
-    status is "completed" or "failed".
+    Pass any column name as a keyword argument and it gets updated.
+    For example:
+        _update_log(db, job_id, status="running")
+        _update_log(db, job_id, status="completed", items_count=12)
+
+    finished_at is set automatically when the status is "completed"
+    or "failed", so you don't need to pass it explicitly.
     """
-    # Set the finish time automatically when the job ends
     kwargs["finished_at"] = (
         datetime.utcnow()
         if kwargs.get("status") in ("completed", "failed")
