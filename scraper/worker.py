@@ -32,6 +32,7 @@ if _APP_DIR not in sys.path:
 
 from blinkit import scrape_search as blinkit_scrape_search
 from zepto import scrape_search as zepto_scrape_search
+from relevance import filter_relevant
 
 from celery import Celery
 from dotenv import load_dotenv
@@ -115,8 +116,13 @@ def _run_scrape(query: str, job_id: str, scraper_fn, platform: str):
         _update_log(db, job_id, status="running")
 
         # Step 2: Open a browser and collect product data
-        products = asyncio.run(scraper_fn(query))
-        print(f"[worker:{platform}] collected {len(products)} products for '{query}'")
+        raw_products = asyncio.run(scraper_fn(query))
+        print(f"[worker:{platform}] collected {len(raw_products)} raw products for '{query}'")
+
+        # Step 2b: Drop products that aren't relevant to the query.
+        # e.g. searching "amul milk" should not save Amul Butter or Amul Chocolate.
+        products = filter_relevant(raw_products, query)
+        print(f"[worker:{platform}] kept {len(products)} relevant products after filtering")
 
         # Step 3: Save each product to the database
         now = datetime.utcnow()
