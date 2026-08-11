@@ -1,5 +1,5 @@
 export default function ProductCard({ product }) {
-  const { name, price, mrp, unit, image_url, source_url } = product;
+  const { name, price, mrp, unit, image_url, source_url, source } = product;
 
   const discount =
     mrp && mrp > price ? Math.round(((mrp - price) / mrp) * 100) : 0;
@@ -20,6 +20,7 @@ export default function ProductCard({ product }) {
         {discount > 0 && (
           <span className="discount-badge">{discount}% off</span>
         )}
+        {source && <span className="source-badge">{source}</span>}
       </div>
 
       <div className="card-body">
