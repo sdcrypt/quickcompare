@@ -213,6 +213,68 @@ body {
 .card-price   { font-size: 1rem; font-weight: 700; color: #1a1a2e; }
 .card-mrp     { font-size: 0.8rem; color: #aaa; text-decoration: line-through; }
 
+/* ── Unit filter chips ── */
+.unit-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 20px 0 4px;
+}
+
+.unit-filter-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #666;
+  white-space: nowrap;
+}
+
+.unit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.unit-chip {
+  padding: 5px 14px;
+  border: 1.5px solid #d0d5dd;
+  border-radius: 20px;
+  background: #fff;
+  color: #444;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.unit-chip:hover:not(.unit-chip--active) {
+  border-color: #0f9e6e;
+  color: #0f9e6e;
+}
+
+.unit-chip--active {
+  background: #0f9e6e;
+  border-color: #0f9e6e;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* Filter note in the results meta line */
+.results-meta-filter {
+  color: #0f9e6e;
+  font-weight: 600;
+}
+
+/* Message shown inside a column when no products match the selected unit */
+.no-unit-results {
+  padding: 20px 14px;
+  color: #aaa;
+  font-size: 0.85rem;
+  text-align: center;
+  width: 100%;
+}
+
 /* ── Platform side-by-side columns ── */
 .platform-columns {
   display: grid;
