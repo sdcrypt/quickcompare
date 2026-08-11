@@ -26,6 +26,7 @@ Note on selectors:
 
 import asyncio
 import re
+from urllib.parse import quote_plus
 
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
@@ -82,6 +83,10 @@ SEL_UNIT = (
 SEL_IMAGE = "img"
 
 
+class ZeptoScrapeError(RuntimeError):
+    """Raised when Zepto renders no usable product data."""
+
+
 # ── Public function ───────────────────────────────────────────────────────────
 
 async def scrape_search(query: str) -> list[dict]:
@@ -95,7 +100,8 @@ async def scrape_search(query: str) -> list[dict]:
     Each dictionary contains: name, price, mrp, unit, image_url,
     source_url, search_query, source, in_stock.
 
-    Returns an empty list if no products were found or an error occurred.
+    Raises ZeptoScrapeError if no products were found or the page could not
+    be scraped. The worker records that as a failed job with a useful message.
     """
     results = []
     async with async_playwright() as p:
@@ -129,7 +135,7 @@ async def scrape_search(query: str) -> list[dict]:
             await _set_location(page)
 
             # Step 3: Go to the search results page for our query
-            search_url = f"https://www.zeptonow.com/search?query={query.replace(' ', '%20')}"
+            search_url = _search_url(query)
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
 
@@ -138,6 +144,7 @@ async def scrape_search(query: str) -> list[dict]:
 
         except Exception as exc:
             print(f"[zepto] scrape error: {exc}")
+            raise
         finally:
             await browser.close()
 
@@ -163,10 +170,10 @@ async def _set_location(page) -> None:
 
         # Look for the pincode / location input field
         pincode_input = page.locator(
-            "input[placeholder*='pincode'], "
-            "input[placeholder*='location'], "
-            "input[placeholder*='area'], "
-            "input[placeholder*='delivery']"
+            "input[placeholder*='pincode' i], "
+            "input[placeholder*='location' i], "
+            "input[placeholder*='area' i], "
+            "input[placeholder*='delivery' i]"
         ).first
 
         if not await pincode_input.is_visible(timeout=4_000):
@@ -179,7 +186,7 @@ async def _set_location(page) -> None:
         # Select the first address suggestion from the dropdown
         suggestion = page.locator(
             "li[class*='suggestion'], "
-            "[data-testid='suggestion'], "
+            "[data-testid*='suggestion'], "
             "[class*='LocationSuggestion'], "
             "[class*='suggestion-item']"
         ).first
@@ -212,8 +219,7 @@ async def _extract_products(page, query: str) -> list[dict]:
     try:
         await page.wait_for_selector(SEL_PRODUCT_CARD, timeout=10_000)
     except PWTimeout:
-        print("[zepto] no product cards found — check selectors or location setup")
-        return products
+        raise ZeptoScrapeError(await _debug_message(page, "no product cards found"))
 
     # Scroll down to load lazy content
     for _ in range(SCROLL_ROUNDS):
@@ -225,10 +231,11 @@ async def _extract_products(page, query: str) -> list[dict]:
 
     for card in cards[:MAX_PRODUCTS]:
         try:
-            name  = await _text(card, SEL_NAME)
-            price = _parse_price(await _text(card, SEL_PRICE))
-            mrp   = _parse_price(await _text(card, SEL_MRP))
-            unit  = await _text(card, SEL_UNIT)
+            card_text = await card.inner_text()
+            name  = await _text(card, SEL_NAME) or _fallback_name(card_text)
+            price = _parse_price(await _text(card, SEL_PRICE)) or _fallback_price(card_text)
+            mrp   = _parse_price(await _text(card, SEL_MRP)) or _fallback_mrp(card_text, price)
+            unit  = await _text(card, SEL_UNIT) or _fallback_unit(card_text)
             img   = await _attr(card, SEL_IMAGE, "src")
 
             # Skip cards that look like ads or empty placeholders
@@ -241,13 +248,16 @@ async def _extract_products(page, query: str) -> list[dict]:
                 "mrp":          mrp if mrp else price,  # if no MRP listed, treat price as MRP
                 "unit":         unit,
                 "image_url":    img,
-                "source_url":   f"https://www.zeptonow.com/search?query={query.replace(' ', '%20')}",
+                "source_url":   _search_url(query),
                 "search_query": query.lower(),
                 "source":       "zepto",
                 "in_stock":     True,
             })
         except Exception:
             continue  # One broken card shouldn't stop the whole scrape
+
+    if not products:
+        raise ZeptoScrapeError(await _debug_message(page, f"{len(cards)} cards found but no usable products parsed"))
 
     return products
 
@@ -282,3 +292,81 @@ def _parse_price(text: str) -> float:
     text = text.replace(",", "")
     match = re.search(r"\d+\.?\d*", text)
     return float(match.group()) if match else 0.0
+
+
+def _fallback_name(text: str) -> str:
+    """Use card line order when Zepto's hashed classes change."""
+    for line in _lines(text):
+        if re.fullmatch(r"(add|off)", line, re.I):
+            continue
+        if re.fullmatch(r"₹\s*\d[\d,]*(?:\.\d+)?", line, re.I):
+            continue
+        if re.fullmatch(r"\(?\d+(?:\.\d+)?[km]?\)?", line, re.I):
+            continue
+        if _looks_like_unit(line):
+            continue
+        return line
+    return ""
+
+
+def _fallback_price(text: str) -> float:
+    prices = _prices(text)
+    return prices[0] if prices else 0.0
+
+
+def _fallback_mrp(text: str, price: float) -> float:
+    for candidate in _prices(text)[1:]:
+        if candidate > price:
+            return candidate
+    return 0.0
+
+
+def _fallback_unit(text: str) -> str:
+    for line in _lines(text):
+        if _looks_like_unit(line):
+            return line
+    return ""
+
+
+def _looks_like_unit(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|ltr|pcs?|pieces|pack|packs)\b",
+            line,
+            re.I,
+        )
+    )
+
+
+def _prices(text: str) -> list[float]:
+    return [
+        float(match.replace(",", ""))
+        for match in re.findall(r"₹\s*(\d[\d,]*(?:\.\d+)?)", text)
+    ]
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _search_url(query: str) -> str:
+    return f"https://www.zepto.com/search?query={quote_plus(query)}"
+
+
+async def _debug_message(page, reason: str) -> str:
+    body_text = ""
+    try:
+        body_text = (await page.locator("body").inner_text(timeout=1_000))[:500]
+    except Exception:
+        pass
+
+    title = ""
+    try:
+        title = await page.title()
+    except Exception:
+        pass
+
+    return (
+        f"{reason}; title={title!r}; url={page.url!r}; "
+        f"body_preview={body_text!r}"
+    )

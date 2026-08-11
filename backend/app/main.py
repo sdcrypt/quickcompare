@@ -17,11 +17,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
+from app.db.migrate import run_migrations
 from app.db.session import Base, engine
 
 # Auto-create any missing tables on startup (products, scrape_logs).
 # If the tables already exist this does nothing, so it is safe to call every time.
 Base.metadata.create_all(bind=engine)
+run_migrations()
 
 app = FastAPI(title="QuickCompare API")
 
