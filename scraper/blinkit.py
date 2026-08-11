@@ -28,6 +28,7 @@ Important note on selectors:
 
 import asyncio
 import re
+from urllib.parse import quote_plus
 
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
@@ -42,15 +43,44 @@ SCROLL_PAUSE_MS = 800        # Milliseconds to wait after each scroll
 # ── Page element selectors ────────────────────────────────────────────────────
 # These tell Playwright where to look for specific pieces of data on the page.
 
-SEL_PRODUCT_CARD = "[data-testid='product-card'], .product-container"
-SEL_NAME         = "[class*='Product__UpdatedTitle'], [class*='name'], h3"
-SEL_PRICE        = (
-    "[class*='Product__UpdatedPriceAndAtc'] [class*='price']:not([class*='line-through']), "
-    "[class*='selling-price'], [class*='final-price']"
+SEL_PRODUCT_CARD = (
+    "[data-testid*='product-card'], "
+    "[class*='Product__ProductContainer'], "
+    "[class*='ProductCard'], "
+    "[class*='product-card'], "
+    "[class*='tw-h-full'][class*='tw-flex-col'][class*='tw-pb-3'], "
+    ".product-container"
 )
-SEL_MRP   = "[class*='line-through'], [class*='mrp'], s"
-SEL_UNIT  = "[class*='weight'], [class*='unit'], [class*='quantity'], [class*='grammage']"
+SEL_NAME         = (
+    "[data-testid*='name'], "
+    "[data-testid*='title'], "
+    "[class*='ProductName'], "
+    "[class*='Product__UpdatedTitle'], "
+    "[class*='tw-line-clamp-2'], "
+    "[class*='name'], "
+    "h3, h2"
+)
+SEL_PRICE        = (
+    "[data-testid*='price'], "
+    "[class*='Product__UpdatedPriceAndAtc'] [class*='price']:not([class*='line-through']), "
+    "[class*='selling-price'], "
+    "[class*='final-price'], "
+    "[class*='price']:not([class*='line-through'])"
+)
+SEL_MRP   = "[data-testid*='mrp'], [class*='line-through'], [class*='mrp'], s, del"
+SEL_UNIT  = (
+    "[data-testid*='unit'], "
+    "[data-testid*='weight'], "
+    "[class*='weight'], "
+    "[class*='unit'], "
+    "[class*='quantity'], "
+    "[class*='grammage']"
+)
 SEL_IMAGE = "img"
+
+
+class BlinkitScrapeError(RuntimeError):
+    """Raised when Blinkit renders no usable product data."""
 
 
 # ── Public function ───────────────────────────────────────────────────────────
@@ -65,7 +95,8 @@ async def scrape_search(query: str) -> list[dict]:
     Each dictionary contains: name, price, mrp, unit, image_url,
     source_url, search_query, source, in_stock.
 
-    Returns an empty list if no products were found or an error occurred.
+    Raises BlinkitScrapeError if no products were found or the page could not
+    be scraped. The worker records that as a failed job with a useful message.
     """
     results = []
     async with async_playwright() as p:
@@ -93,7 +124,7 @@ async def scrape_search(query: str) -> list[dict]:
             await _set_location(page)
 
             # Step 3: Go straight to the search results for our query
-            search_url = f"https://blinkit.com/s/?q={query.replace(' ', '+')}"
+            search_url = _search_url(query)
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
 
@@ -102,6 +133,7 @@ async def scrape_search(query: str) -> list[dict]:
 
         except Exception as exc:
             print(f"[blinkit] scrape error: {exc}")
+            raise
         finally:
             await browser.close()
 
@@ -123,18 +155,20 @@ async def _set_location(page) -> None:
     """
     try:
         location_btn = page.locator(
-            "//button[contains(., 'Detect') or contains(., 'location')]"
+            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'detect') "
+            "or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'location') "
+            "or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'delivery')]"
         ).first
 
-        # If there's no location button visible, we're already set
-        if not await location_btn.is_visible(timeout=3_000):
-            return
-
-        await location_btn.click()
-        await page.wait_for_timeout(1_000)
+        if await location_btn.is_visible(timeout=4_000):
+            await location_btn.click()
+            await page.wait_for_timeout(1_000)
 
         pincode_input = page.locator(
-            "input[placeholder*='pincode'], input[placeholder*='location']"
+            "input[placeholder*='pincode' i], "
+            "input[placeholder*='location' i], "
+            "input[placeholder*='delivery' i], "
+            "input[placeholder*='area' i]"
         ).first
 
         if await pincode_input.is_visible(timeout=3_000):
@@ -143,10 +177,13 @@ async def _set_location(page) -> None:
 
             # Pick the first suggestion from the dropdown
             suggestion = page.locator(
-                "li[class*='suggestion'], [data-testid='suggestion']"
+                "[class*='LocationSearchList__LocationDetailContainer'], "
+                "li[class*='suggestion'], "
+                "[data-testid*='suggestion']"
             ).first
             if await suggestion.is_visible(timeout=2_000):
                 await suggestion.click()
+                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
                 await page.wait_for_timeout(1_500)
 
     except PWTimeout:
@@ -173,8 +210,7 @@ async def _extract_products(page, query: str) -> list[dict]:
     try:
         await page.wait_for_selector(SEL_PRODUCT_CARD, timeout=10_000)
     except PWTimeout:
-        print("[blinkit] no product cards found — check selectors or location")
-        return products
+        raise BlinkitScrapeError(await _debug_message(page, "no product cards found"))
 
     # Scroll down several times to trigger lazy-loaded content
     for _ in range(SCROLL_ROUNDS):
@@ -182,13 +218,15 @@ async def _extract_products(page, query: str) -> list[dict]:
         await page.wait_for_timeout(SCROLL_PAUSE_MS)
 
     cards = await page.query_selector_all(SEL_PRODUCT_CARD)
+    print(f"[blinkit] found {len(cards)} raw cards for '{query}'")
 
     for card in cards[:MAX_PRODUCTS]:
         try:
-            name  = await _text(card, SEL_NAME)
-            price = _parse_price(await _text(card, SEL_PRICE))
+            card_text = await card.inner_text()
+            name  = await _text(card, SEL_NAME) or _fallback_name(card_text)
+            price = _parse_price(await _text(card, SEL_PRICE)) or _fallback_price(card_text)
             mrp   = _parse_price(await _text(card, SEL_MRP))
-            unit  = await _text(card, SEL_UNIT)
+            unit  = await _text(card, SEL_UNIT) or _fallback_unit(card_text)
             img   = await _attr(card, SEL_IMAGE, "src")
 
             # Skip cards that look like banners or placeholders
@@ -201,13 +239,16 @@ async def _extract_products(page, query: str) -> list[dict]:
                 "mrp":          mrp if mrp else price,  # if no MRP listed, use price
                 "unit":         unit,
                 "image_url":    img,
-                "source_url":   f"https://blinkit.com/s/?q={query.replace(' ', '+')}",
+                "source_url":   _search_url(query),
                 "search_query": query.lower(),
                 "source":       "blinkit",
                 "in_stock":     True,
             })
         except Exception:
             continue  # One broken card shouldn't stop the whole scrape
+
+    if not products:
+        raise BlinkitScrapeError(await _debug_message(page, f"{len(cards)} cards found but no usable products parsed"))
 
     return products
 
@@ -242,3 +283,50 @@ def _parse_price(text: str) -> float:
     text = text.replace(",", "")
     match = re.search(r"\d+\.?\d*", text)
     return float(match.group()) if match else 0.0
+
+
+def _fallback_name(text: str) -> str:
+    """Use the first non-price-looking card line when selectors miss the title."""
+    for line in _lines(text):
+        if not re.search(r"(₹|rs\.?|add|off|%|\d+\s*(mins?|g|kg|ml|l|ltr|pcs?))", line, re.I):
+            return line
+    return ""
+
+
+def _fallback_price(text: str) -> float:
+    match = re.search(r"(?:₹|rs\.?\s*)(\d[\d,]*(?:\.\d+)?)", text, re.I)
+    return float(match.group(1).replace(",", "")) if match else 0.0
+
+
+def _fallback_unit(text: str) -> str:
+    for line in _lines(text):
+        if re.fullmatch(r"\d+(?:\.\d+)?\s*(?:g|kg|ml|l|ltr|pcs?|pieces|pack|packs)", line, re.I):
+            return line
+    return ""
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _search_url(query: str) -> str:
+    return f"https://blinkit.com/s/?q={quote_plus(query)}"
+
+
+async def _debug_message(page, reason: str) -> str:
+    body_text = ""
+    try:
+        body_text = (await page.locator("body").inner_text(timeout=1_000))[:500]
+    except Exception:
+        pass
+
+    title = ""
+    try:
+        title = await page.title()
+    except Exception:
+        pass
+
+    return (
+        f"{reason}; title={title!r}; url={page.url!r}; "
+        f"body_preview={body_text!r}"
+    )

@@ -22,7 +22,16 @@ If they don't match, the task sits in the queue forever and nothing happens.
 
 import asyncio
 import os
+import sys
 from datetime import datetime
+
+# Celery prefork workers may not have /app on sys.path — ensure scraper modules resolve.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
+from blinkit import scrape_search as blinkit_scrape_search
+from zepto import scrape_search as zepto_scrape_search
 
 from celery import Celery
 from dotenv import load_dotenv
@@ -55,8 +64,11 @@ def scrape_blinkit(query: str, job_id: str):
     The job_id links back to a row in scrape_logs so the frontend can
     track progress.
     """
-    from blinkit import scrape_search
-    _run_scrape(query, job_id, scrape_search, platform="blinkit")
+    try:
+        _run_scrape(query, job_id, blinkit_scrape_search, platform="blinkit")
+    except Exception as exc:
+        _mark_job_failed(job_id, exc)
+        raise
 
 
 @app.task(name="scraper.worker.scrape_zepto")
@@ -68,8 +80,11 @@ def scrape_zepto(query: str, job_id: str):
     Follows the exact same flow as scrape_blinkit, just uses the
     Zepto scraper instead.
     """
-    from zepto import scrape_search
-    _run_scrape(query, job_id, scrape_search, platform="zepto")
+    try:
+        _run_scrape(query, job_id, zepto_scrape_search, platform="zepto")
+    except Exception as exc:
+        _mark_job_failed(job_id, exc)
+        raise
 
 
 # ── Shared scrape runner ──────────────────────────────────────────────────────
@@ -133,6 +148,15 @@ def _run_scrape(query: str, job_id: str, scraper_fn, platform: str):
 
 
 # ── DB log helper ─────────────────────────────────────────────────────────────
+
+def _mark_job_failed(job_id: str, exc: Exception):
+    """Mark a job failed when the task dies before _run_scrape starts."""
+    db = SessionLocal()
+    try:
+        _update_log(db, job_id, status="failed", error=str(exc))
+    finally:
+        db.close()
+
 
 def _update_log(db, job_id: str, **kwargs):
     """
