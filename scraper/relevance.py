@@ -11,16 +11,14 @@ The problem this solves:
 How the scoring works:
     Each product name is scored against the query using three signals:
 
-    1. Word coverage  — how many of the query words appear in the product
-                        name as whole words? This is the most important signal.
-                        e.g. "amul milk" vs "Amul Gold Full Cream Milk 1L"
-                             "amul" ✅  "milk" ✅  → coverage = 100%
+    1. Word coverage  — how many query words appear in the product name
+                        as whole words? Uses \\b word boundaries so "milk"
+                        does not match "milkmaid".
 
-    2. Partial ratio  — overall fuzzy similarity. Handles cases where the
-                        query words appear inside a longer product name.
+    2. Partial ratio  — fuzzy similarity when the query appears inside a
+                        longer product name.
 
-    3. Token sort ratio — same as partial ratio but ignores word order,
-                          so "milk amul" and "Amul Milk" score equally.
+    3. Token sort ratio — fuzzy similarity that ignores word order.
 
     The three signals are combined into a single score from 0 to 1.
     Products below RELEVANCE_THRESHOLD are discarded.
@@ -36,7 +34,6 @@ import re
 from rapidfuzz import fuzz
 
 # Products with a combined relevance score below this are discarded.
-# Adjust this constant if results are still too broad or too narrow.
 RELEVANCE_THRESHOLD = 0.55
 
 
@@ -78,23 +75,13 @@ def _score(product_name: str, query: str) -> float:
         return 0.0
 
     # ── Signal 1: Word coverage ───────────────────────────────────────────────
-    # Count how many query words appear in the product name as whole words.
-    # Using \b (word boundary) so "milk" does not match "milkmaid".
     words_found = sum(
         1 for word in query_words
         if re.search(r"\b" + re.escape(word) + r"\b", name)
     )
     word_coverage = words_found / len(query_words)
 
-    # ── Signal 2: Partial ratio ───────────────────────────────────────────────
-    # Checks if the entire query appears as a substring anywhere in the name.
-    # Handles short queries inside long product names well.
-    partial = fuzz.partial_ratio(q, name) / 100
-
-    # ── Signal 3: Token sort ratio ────────────────────────────────────────────
-    # Ignores word order — "milk amul" and "Amul Milk" both score the same.
+    partial    = fuzz.partial_ratio(q, name) / 100
     token_sort = fuzz.token_sort_ratio(q, name) / 100
 
-    # ── Combined score ────────────────────────────────────────────────────────
-    # Word coverage is weighted highest because it's the most precise signal.
     return (0.5 * word_coverage) + (0.3 * partial) + (0.2 * token_sort)

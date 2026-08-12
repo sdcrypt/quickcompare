@@ -31,6 +31,8 @@ from urllib.parse import quote_plus
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
 
+from page_checks import login_required_error, scrape_error
+
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 DEFAULT_PINCODE = "110001"   # New Delhi — change to any valid Indian pincode
@@ -139,6 +141,10 @@ async def scrape_search(query: str) -> list[dict]:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
 
+            login_msg = await login_required_error(page, "zepto")
+            if login_msg:
+                raise ZeptoScrapeError(login_msg)
+
             # Step 4 & 5: Scroll down and collect product data
             results = await _extract_products(page, query)
 
@@ -219,7 +225,7 @@ async def _extract_products(page, query: str) -> list[dict]:
     try:
         await page.wait_for_selector(SEL_PRODUCT_CARD, timeout=10_000)
     except PWTimeout:
-        raise ZeptoScrapeError(await _debug_message(page, "no product cards found"))
+        raise ZeptoScrapeError(await scrape_error(page, "zepto", "no product cards found"))
 
     # Scroll down to load lazy content
     for _ in range(SCROLL_ROUNDS):
@@ -257,7 +263,9 @@ async def _extract_products(page, query: str) -> list[dict]:
             continue  # One broken card shouldn't stop the whole scrape
 
     if not products:
-        raise ZeptoScrapeError(await _debug_message(page, f"{len(cards)} cards found but no usable products parsed"))
+        raise ZeptoScrapeError(
+            await scrape_error(page, "zepto", f"{len(cards)} cards found but no usable products parsed")
+        )
 
     return products
 
@@ -295,26 +303,66 @@ def _parse_price(text: str) -> float:
 
 
 def _fallback_name(text: str) -> str:
-    """Use card line order when Zepto's hashed classes change."""
-    for line in _lines(text):
-        if re.fullmatch(r"(add|off)", line, re.I):
-            continue
-        if re.fullmatch(r"₹\s*\d[\d,]*(?:\.\d+)?", line, re.I):
-            continue
-        if re.fullmatch(r"\(?\d+(?:\.\d+)?[km]?\)?", line, re.I):
-            continue
-        if _looks_like_unit(line):
-            continue
-        return line
-    return ""
+    """
+    Guess the product name from a card's full visible text.
+
+    Used when CSS selectors miss the title element. Splits the card text
+    into lines, drops junk lines (prices, EMI tags, ratings, etc.), and
+    returns the longest remaining line — that is usually the product title.
+    """
+    candidates = [line for line in _lines(text) if not _is_junk_name_line(line)]
+    return max(candidates, key=len) if candidates else ""
+
+
+def _is_junk_name_line(line: str) -> bool:
+    """
+    Return True if a line from a product card is unlikely to be the title.
+
+    Zepto cards contain many short UI lines mixed with the product name:
+    "ADD", "₹6149", "₹648/month EMI", "4.7 (212)", "1 pc", etc. This helper
+    filters those out so _fallback_name() does not pick a price or badge
+    instead of the actual product title.
+
+    Returns False for longer descriptive lines that look like real names.
+    """
+    if re.fullmatch(r"(add|off)", line, re.I):
+        return True
+    if re.fullmatch(r"₹\s*\d[\d,]*(?:\.\d+)?", line, re.I):
+        return True
+    if re.search(r"\bemi\b|/month|no cost|delivery in|similar product", line, re.I):
+        return True
+    if re.fullmatch(r"₹\s*\d[\d,]*.*\boff\b", line, re.I):
+        return True
+    if re.fullmatch(r"\d+\.\d+\s*\(\d+\)", line):
+        return True
+    if re.fullmatch(r"\(?\d+(?:\.\d+)?[km]?\)?", line, re.I):
+        return True
+    if _looks_like_unit(line):
+        return True
+    if len(line) < 12:
+        return True
+    return False
 
 
 def _fallback_price(text: str) -> float:
+    """
+    Extract the selling price from a card's full text when selectors fail.
+
+    Finds all ₹ amounts in the card and returns the first one (usually the
+    current selling price). Returns 0.0 if none are found.
+    """
     prices = _prices(text)
     return prices[0] if prices else 0.0
 
 
 def _fallback_mrp(text: str, price: float) -> float:
+    """
+    Extract the original MRP from a card's full text when selectors fail.
+
+    Looks for ₹ amounts after the selling price and returns the first one
+    that is higher than the selling price (the struck-through MRP).
+    Returns 0.0 if no higher amount is found.
+    """
     for candidate in _prices(text)[1:]:
         if candidate > price:
             return candidate
@@ -322,6 +370,12 @@ def _fallback_mrp(text: str, price: float) -> float:
 
 
 def _fallback_unit(text: str) -> str:
+    """
+    Extract pack size from a card's full text when selectors fail.
+
+    Scans each line for patterns like "500 g", "1 L", or "1 pc".
+    Returns the first match, or an empty string if none is found.
+    """
     for line in _lines(text):
         if _looks_like_unit(line):
             return line
@@ -329,6 +383,11 @@ def _fallback_unit(text: str) -> str:
 
 
 def _looks_like_unit(line: str) -> bool:
+    """
+    Return True if a line looks like a pack-size label rather than a name.
+
+    Matches strings like "500 g", "1 L", "2 pcs", or "1 pack".
+    """
     return bool(
         re.search(
             r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|ltr|pcs?|pieces|pack|packs)\b",
@@ -339,6 +398,12 @@ def _looks_like_unit(line: str) -> bool:
 
 
 def _prices(text: str) -> list[float]:
+    """
+    Find every ₹ price in a block of text, in top-to-bottom order.
+
+    Handles comma-separated amounts like "₹6,149". Returns an empty list
+    when no prices are found.
+    """
     return [
         float(match.replace(",", ""))
         for match in re.findall(r"₹\s*(\d[\d,]*(?:\.\d+)?)", text)
@@ -346,27 +411,10 @@ def _prices(text: str) -> list[float]:
 
 
 def _lines(text: str) -> list[str]:
+    """Split card text into non-empty, trimmed lines."""
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def _search_url(query: str) -> str:
+    """Build the Zepto search-results URL for a given query string."""
     return f"https://www.zepto.com/search?query={quote_plus(query)}"
-
-
-async def _debug_message(page, reason: str) -> str:
-    body_text = ""
-    try:
-        body_text = (await page.locator("body").inner_text(timeout=1_000))[:500]
-    except Exception:
-        pass
-
-    title = ""
-    try:
-        title = await page.title()
-    except Exception:
-        pass
-
-    return (
-        f"{reason}; title={title!r}; url={page.url!r}; "
-        f"body_preview={body_text!r}"
-    )

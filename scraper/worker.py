@@ -124,6 +124,14 @@ def _run_scrape(query: str, job_id: str, scraper_fn, platform: str):
         products = filter_relevant(raw_products, query)
         print(f"[worker:{platform}] kept {len(products)} relevant products after filtering")
 
+        if not products:
+            if raw_products:
+                raise RuntimeError(
+                    f"{platform.capitalize()} returned {len(raw_products)} products "
+                    f"but none matched '{query}'"
+                )
+            raise RuntimeError(f"{platform.capitalize()} returned no products for '{query}'")
+
         # Step 3: Save each product to the database
         now = datetime.utcnow()
         for p in products:

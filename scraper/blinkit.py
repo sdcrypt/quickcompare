@@ -33,6 +33,8 @@ from urllib.parse import quote_plus
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
 
+from page_checks import login_required_error, scrape_error
+
 # ── Settings you can change ───────────────────────────────────────────────────
 
 DEFAULT_PINCODE = "110001"   # New Delhi — change to any valid Indian pincode
@@ -128,6 +130,10 @@ async def scrape_search(query: str) -> list[dict]:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
 
+            login_msg = await login_required_error(page, "blinkit")
+            if login_msg:
+                raise BlinkitScrapeError(login_msg)
+
             # Step 4 & 5: Scroll and collect
             results = await _extract_products(page, query)
 
@@ -210,7 +216,7 @@ async def _extract_products(page, query: str) -> list[dict]:
     try:
         await page.wait_for_selector(SEL_PRODUCT_CARD, timeout=10_000)
     except PWTimeout:
-        raise BlinkitScrapeError(await _debug_message(page, "no product cards found"))
+        raise BlinkitScrapeError(await scrape_error(page, "blinkit", "no product cards found"))
 
     # Scroll down several times to trigger lazy-loaded content
     for _ in range(SCROLL_ROUNDS):
@@ -248,7 +254,9 @@ async def _extract_products(page, query: str) -> list[dict]:
             continue  # One broken card shouldn't stop the whole scrape
 
     if not products:
-        raise BlinkitScrapeError(await _debug_message(page, f"{len(cards)} cards found but no usable products parsed"))
+        raise BlinkitScrapeError(
+            await scrape_error(page, "blinkit", f"{len(cards)} cards found but no usable products parsed")
+        )
 
     return products
 
@@ -286,19 +294,58 @@ def _parse_price(text: str) -> float:
 
 
 def _fallback_name(text: str) -> str:
-    """Use the first non-price-looking card line when selectors miss the title."""
-    for line in _lines(text):
-        if not re.search(r"(₹|rs\.?|add|off|%|\d+\s*(mins?|g|kg|ml|l|ltr|pcs?))", line, re.I):
-            return line
-    return ""
+    """
+    Guess the product name from a card's full visible text.
+
+    Used when CSS selectors miss the title element. Splits the card text
+    into lines, drops junk lines (prices, EMI tags, ratings, etc.), and
+    returns the longest remaining line — that is usually the product title.
+    """
+    candidates = [line for line in _lines(text) if not _is_junk_name_line(line)]
+    return max(candidates, key=len) if candidates else ""
+
+
+def _is_junk_name_line(line: str) -> bool:
+    """
+    Return True if a line from a product card is unlikely to be the title.
+
+    Blinkit cards contain UI noise mixed with the product name: prices,
+    discount badges, EMI offers, star ratings, and pack sizes. This helper
+    filters those out so _fallback_name() does not pick a price or badge
+    instead of the actual product title.
+
+    Returns False for longer descriptive lines that look like real names.
+    """
+    if re.search(r"(₹|rs\.?|add|off|%)", line, re.I) and len(line) < 40:
+        if re.search(r"(₹|rs\.?|\boff\b|emi|/month)", line, re.I):
+            return True
+    if re.fullmatch(r"\d+\.\d+\s*\(\d+\)", line):
+        return True
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*(?:g|kg|ml|l|ltr|pcs?|pieces|pack|packs)", line, re.I):
+        return True
+    if len(line) < 12:
+        return True
+    return False
 
 
 def _fallback_price(text: str) -> float:
+    """
+    Extract the selling price from a card's full text when selectors fail.
+
+    Finds the first ₹ or Rs. amount in the card text. Returns 0.0 if none
+    is found.
+    """
     match = re.search(r"(?:₹|rs\.?\s*)(\d[\d,]*(?:\.\d+)?)", text, re.I)
     return float(match.group(1).replace(",", "")) if match else 0.0
 
 
 def _fallback_unit(text: str) -> str:
+    """
+    Extract pack size from a card's full text when selectors fail.
+
+    Scans each line for patterns like "500 g", "1 L", or "2 pcs".
+    Returns the first match, or an empty string if none is found.
+    """
     for line in _lines(text):
         if re.fullmatch(r"\d+(?:\.\d+)?\s*(?:g|kg|ml|l|ltr|pcs?|pieces|pack|packs)", line, re.I):
             return line
@@ -306,27 +353,10 @@ def _fallback_unit(text: str) -> str:
 
 
 def _lines(text: str) -> list[str]:
+    """Split card text into non-empty, trimmed lines."""
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def _search_url(query: str) -> str:
+    """Build the Blinkit search-results URL for a given query string."""
     return f"https://blinkit.com/s/?q={quote_plus(query)}"
-
-
-async def _debug_message(page, reason: str) -> str:
-    body_text = ""
-    try:
-        body_text = (await page.locator("body").inner_text(timeout=1_000))[:500]
-    except Exception:
-        pass
-
-    title = ""
-    try:
-        title = await page.title()
-    except Exception:
-        pass
-
-    return (
-        f"{reason}; title={title!r}; url={page.url!r}; "
-        f"body_preview={body_text!r}"
-    )
