@@ -22,8 +22,9 @@ If they don't match, the task sits in the queue forever and nothing happens.
 
 import asyncio
 import os
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Celery prefork workers may not have /app on sys.path — ensure scraper modules resolve.
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +51,80 @@ app = Celery("quickcompare", broker=REDIS_URL, backend=REDIS_URL)
 # Direct database connection for this worker process
 engine       = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
+
+
+# ── Unit normalisation ────────────────────────────────────────────────────────
+# Map every spelling variant to one canonical abbreviation so that
+# "1 Ltr" (Blinkit) and "1 Litre Pack" (Zepto) both become "1 L" in the DB.
+# Without this, the frontend filter chips can't group the same size together.
+
+_UNIT_MAP = {
+    # Litres
+    "l": "L", "ltr": "L", "ltrs": "L",
+    "liter": "L", "liters": "L", "litre": "L", "litres": "L",
+    # Millilitres
+    "ml": "ml", "millilitre": "ml", "millilitres": "ml",
+    "milliliter": "ml", "milliliters": "ml",
+    # Grams
+    "g": "g", "gm": "g", "gms": "g", "gram": "g", "grams": "g",
+    # Kilograms
+    "kg": "kg", "kgs": "kg", "kilogram": "kg", "kilograms": "kg",
+    # Pieces
+    "pc": "pc", "pcs": "pc", "piece": "pc", "pieces": "pc",
+    # Packs / sachets
+    "pkt": "pkt", "packet": "pkt", "packets": "pkt",
+    "sachet": "sachet", "sachets": "sachet",
+}
+
+# Words that scrapers sometimes append after the real unit — strip these first.
+# e.g. "1 Ltr Pack" → "1 Ltr", "500 ml Bottle" → "500 ml"
+_NOISE_SUFFIX = re.compile(
+    r"\s+(pack|bottle|jar|can|bag|box|pouch|sachet|strip|carton|tin|tub|cup|each|set|roll|rolls|combo)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_unit(raw: str) -> str:
+    """
+    Convert a raw unit string from a scraper into a clean, consistent form.
+
+    Examples (across platforms):
+        "1 Ltr Pack"  → "1 L"       "1 Litre" → "1 L"
+        "500 ml Bottle" → "500 ml"  "1000 ml" → "1 L"
+        "200 grams"   → "200 g"     "1000 g"  → "1 kg"
+
+    If the string cannot be parsed (e.g. "6 x 1L"), it is returned unchanged.
+    """
+    if not raw:
+        return raw or ""
+
+    # 1. Strip trailing noise words
+    s = _NOISE_SUFFIX.sub("", raw.strip())
+
+    # 2. Lowercase + remove spaces for matching: "1 Ltr" → "1ltr"
+    s = s.lower().replace(" ", "")
+
+    # 3. Extract leading number + unit letters
+    m = re.match(r"^([\d.]+)([a-z]+)$", s)
+    if not m:
+        return raw.strip()
+
+    num_str, unit_str = m.groups()
+    canonical = _UNIT_MAP.get(unit_str)
+    if not canonical:
+        return raw.strip()  # Unknown unit abbreviation — leave as-is
+
+    num = float(num_str)
+
+    # 4. Auto-upgrade large quantities: 1000 ml → 1 L, 1000 g → 1 kg
+    if canonical == "ml" and num >= 1000:
+        num, canonical = num / 1000, "L"
+    if canonical == "g" and num >= 1000:
+        num, canonical = num / 1000, "kg"
+
+    # 5. Drop the decimal if it's a whole number: "1.0 L" → "1 L"
+    display = int(num) if num == int(num) else num
+    return f"{display} {canonical}"
 
 
 # ── Platform tasks ────────────────────────────────────────────────────────────
@@ -97,6 +172,8 @@ def _run_scrape(query: str, job_id: str, scraper_fn, platform: str):
     Steps:
         1. Mark the job as "running" so the frontend shows a loading state.
         2. Call the platform's scrape_search() function to collect products.
+        2b. Filter out products that don't match the search query.
+        2c. Normalise unit strings (e.g. "1 Ltr" → "1 L") for cross-platform comparison.
         3. Save every product to the 'products' table.
         4. Mark the job as "completed" with the count of products saved.
 
@@ -131,9 +208,15 @@ def _run_scrape(query: str, job_id: str, scraper_fn, platform: str):
                     f"but none matched '{query}'"
                 )
             raise RuntimeError(f"{platform.capitalize()} returned no products for '{query}'")
+        # Step 2c: Normalise unit strings so both platforms agree on the same label.
+        # e.g. Blinkit "1 Ltr" and Zepto "1 Litre Pack" both become "1 L" before
+        # being saved — this is what makes the frontend unit-filter chips work.
+        for p in products:
+            if p.get("unit"):
+                p["unit"] = _normalize_unit(p["unit"])
 
         # Step 3: Save each product to the database
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for p in products:
             db.execute(
                 text("""
@@ -185,7 +268,7 @@ def _update_log(db, job_id: str, **kwargs):
     or "failed", so you don't need to pass it explicitly.
     """
     kwargs["finished_at"] = (
-        datetime.utcnow()
+        datetime.now(timezone.utc)
         if kwargs.get("status") in ("completed", "failed")
         else None
     )

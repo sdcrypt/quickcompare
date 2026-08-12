@@ -20,17 +20,26 @@
 export function normalizeUnit(raw) {
   if (!raw) return "";
 
-  // Strip spaces and lowercase for parsing
-  const s = raw.toLowerCase().replace(/\s+/g, "");
+  // Step 1: Strip trailing noise words that scrapers sometimes append.
+  // e.g. "1 Ltr Pack" → "1 Ltr",  "500 ml Bottle" → "500 ml"
+  // This mirrors the same strip done in the backend worker before saving,
+  // and serves as a safety net for any data saved before that fix was applied.
+  let s = raw.trim().replace(
+    /\s+(pack|bottle|jar|can|bag|box|pouch|sachet|strip|carton|tin|tub|cup|each|set|roll|rolls|combo)\s*$/i,
+    ""
+  ).trim();
 
-  // Must be: one or more digits (with optional decimal) followed by letters
-  const match = s.match(/^([\d.]+)([a-z]+)$/);
+  // Step 2: Lowercase + remove all spaces so "1 Ltr" becomes "1ltr"
+  const noSpace = s.toLowerCase().replace(/\s+/g, "");
+
+  // Step 3: Must be digits (with optional decimal) followed by unit letters
+  const match = noSpace.match(/^([\d.]+)([a-z]+)$/);
   if (!match) return raw.trim();
 
-  const num      = match[1];           // e.g. "500"
-  const unitPart = match[2];           // e.g. "ml"
+  const num      = match[1];   // e.g. "500"
+  const unitPart = match[2];   // e.g. "ml"
 
-  // Map every known variant to a canonical abbreviation
+  // Map every known variant to one canonical abbreviation
   const UNIT_MAP = {
     // Litres
     l: "L", ltr: "L", ltrs: "L",
@@ -53,12 +62,19 @@ export function normalizeUnit(raw) {
     sachet: "sachet", sachets: "sachet",
   };
 
-  const canonical = UNIT_MAP[unitPart] || unitPart;
+  const canonical = UNIT_MAP[unitPart];
+  // If the unit isn't in the map at all, return the original so we don't lose data
+  if (!canonical) return raw.trim();
 
-  // Remove trailing zeroes for display: "1.0 L" → "1 L"
-  const displayNum = parseFloat(num).toString();
+  const numVal = parseFloat(num);
 
-  return `${displayNum} ${canonical}`;
+  // Auto-upgrade large quantities to the next unit for cleaner display:
+  // 1000 ml → 1 L,  2000 ml → 2 L,  1000 g → 1 kg
+  if (canonical === "ml" && numVal >= 1000) return `${numVal / 1000} L`;
+  if (canonical === "g"  && numVal >= 1000) return `${numVal / 1000} kg`;
+
+  // Remove trailing zeroes: "1.0 L" → "1 L"
+  return `${parseFloat(num).toString()} ${canonical}`;
 }
 
 /**
