@@ -1,5 +1,8 @@
+import { normalizeUnit } from "../utils";
+
 export default function ProductCard({ product }) {
   const { name, price, mrp, unit, image_url, source_url, source } = product;
+  const displayUnit = unit ? normalizeUnit(unit) : "";
 
   const discount =
     mrp && mrp > price ? Math.round(((mrp - price) / mrp) * 100) : 0;
@@ -25,7 +28,7 @@ export default function ProductCard({ product }) {
 
       <div className="card-body">
         <p className="card-name">{name}</p>
-        {unit && <p className="card-unit">{unit}</p>}
+        {displayUnit && <p className="card-unit">{displayUnit}</p>}
         <div className="card-pricing">
           <span className="card-price">₹{price}</span>
           {discount > 0 && <span className="card-mrp">₹{mrp}</span>}

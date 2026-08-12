@@ -82,6 +82,8 @@ _NOISE_SUFFIX = re.compile(
     r"\s+(pack|bottle|jar|can|bag|box|pouch|sachet|strip|carton|tin|tub|cup|each|set|roll|rolls|combo)\s*$",
     re.IGNORECASE,
 )
+# Zepto often wraps the real size: "1 pack (450 ml)", "1 pc (180 ml)"
+_PAREN_SIZE = re.compile(r"\(([^)]+)\)")
 
 
 def _normalize_unit(raw: str) -> str:
@@ -89,22 +91,29 @@ def _normalize_unit(raw: str) -> str:
     Convert a raw unit string from a scraper into a clean, consistent form.
 
     Examples (across platforms):
-        "1 Ltr Pack"  → "1 L"       "1 Litre" → "1 L"
-        "500 ml Bottle" → "500 ml"  "1000 ml" → "1 L"
-        "200 grams"   → "200 g"     "1000 g"  → "1 kg"
+        "1 Ltr Pack"        → "1 L"       "1 Litre" → "1 L"
+        "500 ml Bottle"     → "500 ml"    "1000 ml" → "1 L"
+        "1 pack (450 ml)"   → "450 ml"    "1 pc (180 ml)" → "180 ml"
+        "200 grams"         → "200 g"     "1000 g" → "1 kg"
 
     If the string cannot be parsed (e.g. "6 x 1L"), it is returned unchanged.
     """
     if not raw:
         return raw or ""
 
-    # 1. Strip trailing noise words
-    s = _NOISE_SUFFIX.sub("", raw.strip())
+    # 1. Zepto-style wrappers — pull the size inside parentheses first
+    s = raw.strip()
+    paren = _PAREN_SIZE.search(s)
+    if paren:
+        s = paren.group(1).strip()
 
-    # 2. Lowercase + remove spaces for matching: "1 Ltr" → "1ltr"
+    # 2. Strip trailing noise words
+    s = _NOISE_SUFFIX.sub("", s)
+
+    # 3. Lowercase + remove spaces for matching: "1 Ltr" → "1ltr"
     s = s.lower().replace(" ", "")
 
-    # 3. Extract leading number + unit letters
+    # 4. Extract leading number + unit letters
     m = re.match(r"^([\d.]+)([a-z]+)$", s)
     if not m:
         return raw.strip()
@@ -116,13 +125,13 @@ def _normalize_unit(raw: str) -> str:
 
     num = float(num_str)
 
-    # 4. Auto-upgrade large quantities: 1000 ml → 1 L, 1000 g → 1 kg
+    # 5. Auto-upgrade large quantities: 1000 ml → 1 L, 1000 g → 1 kg
     if canonical == "ml" and num >= 1000:
         num, canonical = num / 1000, "L"
     if canonical == "g" and num >= 1000:
         num, canonical = num / 1000, "kg"
 
-    # 5. Drop the decimal if it's a whole number: "1.0 L" → "1 L"
+    # 6. Drop the decimal if it's a whole number: "1.0 L" → "1 L"
     display = int(num) if num == int(num) else num
     return f"{display} {canonical}"
 

@@ -9,6 +9,7 @@
  * write the same unit in different ways:
  *   "1 L", "1l", "1 Ltr", "1litre", "1000 ml"  →  "1 L"
  *   "500 ml", "500ml", "500 mL"                  →  "500 ml"
+ *   "1 pack (450 ml)", "1 pc (180 ml)"           →  "450 ml", "180 ml"
  *   "200 g", "200g", "200 gm", "200 gms"         →  "200 g"
  *   "1 kg", "1kg", "1 KG"                        →  "1 kg"
  *
@@ -20,19 +21,22 @@
 export function normalizeUnit(raw) {
   if (!raw) return "";
 
-  // Step 1: Strip trailing noise words that scrapers sometimes append.
+  // Step 1: Zepto-style wrappers — "1 pack (450 ml)" → "450 ml"
+  let s = raw.trim();
+  const paren = s.match(/\(([^)]+)\)/);
+  if (paren) s = paren[1].trim();
+
+  // Step 2: Strip trailing noise words that scrapers sometimes append.
   // e.g. "1 Ltr Pack" → "1 Ltr",  "500 ml Bottle" → "500 ml"
-  // This mirrors the same strip done in the backend worker before saving,
-  // and serves as a safety net for any data saved before that fix was applied.
-  let s = raw.trim().replace(
+  s = s.replace(
     /\s+(pack|bottle|jar|can|bag|box|pouch|sachet|strip|carton|tin|tub|cup|each|set|roll|rolls|combo)\s*$/i,
     ""
   ).trim();
 
-  // Step 2: Lowercase + remove all spaces so "1 Ltr" becomes "1ltr"
+  // Step 3: Lowercase + remove all spaces so "1 Ltr" becomes "1ltr"
   const noSpace = s.toLowerCase().replace(/\s+/g, "");
 
-  // Step 3: Must be digits (with optional decimal) followed by unit letters
+  // Step 4: Must be digits (with optional decimal) followed by unit letters
   const match = noSpace.match(/^([\d.]+)([a-z]+)$/);
   if (!match) return raw.trim();
 
