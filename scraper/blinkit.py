@@ -33,11 +33,11 @@ from urllib.parse import quote_plus
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
 
+from config import DEFAULT_PINCODE
 from page_checks import login_required_error, scrape_error
 
 # ── Settings you can change ───────────────────────────────────────────────────
 
-DEFAULT_PINCODE = "110001"   # New Delhi — change to any valid Indian pincode
 MAX_PRODUCTS    = 30         # Maximum products to collect per search (keeps it fast)
 SCROLL_ROUNDS   = 4          # How many times to scroll down to load more results
 SCROLL_PAUSE_MS = 800        # Milliseconds to wait after each scroll
@@ -150,7 +150,7 @@ async def scrape_search(query: str) -> list[dict]:
 
 async def _set_location(page) -> None:
     """
-    Attempt to set the delivery location to DEFAULT_PINCODE.
+    Attempt to set the delivery location to SCRAPER_PINCODE from .env.
 
     Blinkit requires a delivery address before it will show prices.
     This function looks for the location button, clicks it, types the

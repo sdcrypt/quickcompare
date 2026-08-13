@@ -31,11 +31,11 @@ from urllib.parse import quote_plus
 from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
 
+from config import DEFAULT_PINCODE
 from page_checks import login_required_error, scrape_error
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
-DEFAULT_PINCODE = "110001"   # New Delhi — change to any valid Indian pincode
 MAX_PRODUCTS    = 30         # Cap on how many products to collect per search
 SCROLL_ROUNDS   = 4          # Times to scroll down to load more results
 SCROLL_PAUSE_MS = 900        # Milliseconds to wait between scrolls
