@@ -44,7 +44,7 @@ CACHE_TTL_HOURS = 6   # How long scraped data is considered fresh before re-scra
 
 # Add new platforms here as scrapers are built.
 # Each name must match a Celery task: "scraper.worker.scrape_<platform>"
-PLATFORMS = ["blinkit", "zepto"]
+PLATFORMS = ["blinkit", "zepto", "instamart"]
 
 
 # ── Request / response schemas ────────────────────────────────────────────────

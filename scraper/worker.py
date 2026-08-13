@@ -32,6 +32,7 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from blinkit import scrape_search as blinkit_scrape_search
+from instamart import scrape_search as instamart_scrape_search
 from zepto import scrape_search as zepto_scrape_search
 from relevance import filter_relevant
 
@@ -167,6 +168,22 @@ def scrape_zepto(query: str, job_id: str):
     """
     try:
         _run_scrape(query, job_id, zepto_scrape_search, platform="zepto")
+    except Exception as exc:
+        _mark_job_failed(job_id, exc)
+        raise
+
+
+@app.task(name="scraper.worker.scrape_instamart")
+def scrape_instamart(query: str, job_id: str):
+    """
+    Background task: scrape Swiggy Instamart for 'query' and save the results.
+
+    Called automatically by Celery — do not call this directly.
+    Follows the exact same flow as scrape_blinkit and scrape_zepto, just
+    uses the Instamart scraper instead.
+    """
+    try:
+        _run_scrape(query, job_id, instamart_scrape_search, platform="instamart")
     except Exception as exc:
         _mark_job_failed(job_id, exc)
         raise
