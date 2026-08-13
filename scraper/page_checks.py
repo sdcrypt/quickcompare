@@ -19,6 +19,12 @@ LOGIN_WALL_PATTERNS = (
     re.compile(r"you\s+must\s+be\s+logged\s+in", re.I),
 )
 
+BOT_BLOCK_PATTERNS = (
+    re.compile(r"request\s+blocked", re.I),
+    re.compile(r"looks\s+automated", re.I),
+    re.compile(r"access\s+denied", re.I),
+)
+
 
 def login_wall_detected(body_text: str) -> bool:
     return any(pattern.search(body_text) for pattern in LOGIN_WALL_PATTERNS)
@@ -31,6 +37,16 @@ async def body_text(page: Page, limit: int = 2000) -> str:
         return ""
 
 
+def bot_block_detected(body_text: str) -> bool:
+    return any(pattern.search(body_text) for pattern in BOT_BLOCK_PATTERNS)
+
+
+async def access_blocked_error(page: Page, platform: str) -> str | None:
+    if bot_block_detected(await body_text(page)):
+        return f"{platform.capitalize()} blocked automated access"
+    return None
+
+
 async def login_required_error(page: Page, platform: str) -> str | None:
     if login_wall_detected(await body_text(page)):
         return f"{platform.capitalize()} requires login for this search"
@@ -38,6 +54,10 @@ async def login_required_error(page: Page, platform: str) -> str | None:
 
 
 async def scrape_error(page: Page, platform: str, reason: str) -> str:
+    blocked_msg = await access_blocked_error(page, platform)
+    if blocked_msg:
+        return blocked_msg
+
     login_msg = await login_required_error(page, platform)
     if login_msg:
         return login_msg

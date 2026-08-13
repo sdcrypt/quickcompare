@@ -34,7 +34,7 @@ from playwright.async_api import TimeoutError as PWTimeout
 from playwright.async_api import async_playwright
 
 from config import DEFAULT_PINCODE
-from page_checks import login_required_error, scrape_error
+from page_checks import access_blocked_error, login_required_error, scrape_error
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -42,19 +42,31 @@ MAX_PRODUCTS    = 30         # Cap on how many products to collect per search
 SCROLL_ROUNDS   = 4          # Times to scroll down to load more results
 SCROLL_PAUSE_MS = 900        # Milliseconds to wait between scrolls
 
+# Swiggy blocks default headless Playwright — these settings reduce detection.
+_STEALTH_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+]
+_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+_WEBDRIVER_HIDE = (
+    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+)
+
 # ── Page element selectors ────────────────────────────────────────────────────
 # Swiggy uses styled-components with hashed class names, so we layer multiple
 # selectors — more specific data-testid ones first, broader class-name patterns
 # as fallbacks.
 
 SEL_PRODUCT_CARD = (
+    "[data-testid='item-collection-card-full'], "
     "[data-testid='item_list_item_widget'], "
     "[class*='ItemWidget'], "
-    "[class*='item-widget'], "
-    "[class*='ItemRevamp'], "
-    "[class*='ProductCard'], "
-    "[class*='product-card'], "
-    "[class*='styles_container']"
+    "[class*='product-card']"
 )
 SEL_NAME = (
     "[data-testid='item-name'], "
@@ -122,18 +134,17 @@ async def scrape_search(query: str) -> list[dict]:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"],
+            args=_STEALTH_ARGS,
+            ignore_default_args=["--enable-automation"],
         )
         context = await browser.new_context(
-            # Pretend to be a regular Chrome browser so Swiggy doesn't block us
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 800},
+            user_agent=_USER_AGENT,
+            viewport={"width": 1366, "height": 768},
+            locale="en-IN",
+            timezone_id="Asia/Kolkata",
             extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
         )
+        await context.add_init_script(_WEBDRIVER_HIDE)
         page = await context.new_page()
 
         try:
@@ -152,6 +163,10 @@ async def scrape_search(query: str) -> list[dict]:
             search_url = _search_url(query)
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3_000)
+
+            blocked_msg = await access_blocked_error(page, "instamart")
+            if blocked_msg:
+                raise InstamartScrapeError(blocked_msg)
 
             # Check if Swiggy is demanding login before showing results
             login_msg = await login_required_error(page, "instamart")
@@ -271,11 +286,15 @@ async def _extract_products(page, query: str) -> list[dict]:
 
     for card in cards[:MAX_PRODUCTS]:
         try:
-            card_text = await card.inner_text()
-            name  = await _text(card, SEL_NAME)  or _fallback_name(card_text)
-            price = _parse_price(await _text(card, SEL_PRICE)) or _fallback_price(card_text)
-            mrp   = _parse_price(await _text(card, SEL_MRP))   or _fallback_mrp(card_text, price)
-            unit  = await _text(card, SEL_UNIT)  or _fallback_unit(card_text)
+            # Price and unit live in the card wrapper, not inside the testid node itself
+            card_text = await card.evaluate(
+                "el => el.parentElement ? el.parentElement.innerText : el.innerText"
+            )
+            parsed = _parse_card_text(card_text)
+            name  = (parsed["name"] if parsed else "") or await _text(card, SEL_NAME) or _fallback_name(card_text)
+            price = (parsed["price"] if parsed else 0.0) or _parse_price(await _text(card, SEL_PRICE)) or _fallback_price(card_text)
+            mrp   = _parse_price(await _text(card, SEL_MRP)) or _fallback_mrp(card_text, price)
+            unit  = (parsed["unit"] if parsed else "") or await _text(card, SEL_UNIT) or _fallback_unit(card_text)
             img   = await _attr(card, SEL_IMAGE, "src")
 
             # Skip cards that look like banners or empty slots
@@ -334,6 +353,55 @@ def _parse_price(text: str) -> float:
     return float(match.group()) if match else 0.0
 
 
+def _parse_card_text(text: str) -> dict | None:
+    """
+    Parse Swiggy Instamart's line-based card layout.
+
+    Typical shapes:
+        4 MINS / Product name / 400 g / 65
+        4 MINS / Product name / subtitle / 350 g / 50
+    """
+    lines = _lines(text)
+    start = next(
+        (i for i, line in enumerate(lines) if re.match(r"^\d+\s+MINS$", line, re.I)),
+        None,
+    )
+    if start is None:
+        return None
+    lines = lines[start:]
+    if len(lines) < 4:
+        return None
+
+    unit_idx = None
+    for i in range(len(lines) - 1, 0, -1):
+        if re.fullmatch(
+            r"\d+(?:\.\d+)?\s*(?:g|kg|ml|l|ltr|pcs?|pieces|pack|packs)",
+            lines[i],
+            re.I,
+        ):
+            unit_idx = i
+            break
+
+    if unit_idx is None or unit_idx >= len(lines) - 1:
+        return None
+
+    price = 0.0
+    for line in lines[unit_idx + 1 :]:
+        if re.search(r"off|%|switch", line, re.I):
+            continue
+        price = _parse_price(line)
+        if price == 0.0 and line.replace(",", "").isdigit():
+            price = float(line.replace(",", ""))
+        if price > 0.0:
+            break
+
+    name = lines[1] if len(lines) > 1 else ""
+    if not name or price == 0.0:
+        return None
+
+    return {"name": name, "unit": lines[unit_idx], "price": price}
+
+
 def _fallback_name(text: str) -> str:
     """
     Guess the product name from a card's full visible text when CSS selectors miss it.
@@ -369,8 +437,12 @@ def _fallback_price(text: str) -> float:
     """
     Extract the selling price from a card's full text when selectors fail.
 
-    Finds the first ₹ or Rs. amount in the card text. Returns 0.0 if none found.
+    Swiggy often shows the price as a plain number on the last line.
     """
+    parsed = _parse_card_text(text)
+    if parsed:
+        return parsed["price"]
+
     match = re.search(r"(?:₹|rs\.?\s*)(\d[\d,]*(?:\.\d+)?)", text, re.I)
     return float(match.group(1).replace(",", "")) if match else 0.0
 
