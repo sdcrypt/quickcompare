@@ -203,7 +203,6 @@ docker compose up --build
 ```
 
 ## Adding A New Platform
-
 1. Add a new scraper module in `scraper/` with a `scrape_search(query)` function.
 2. Add a matching Celery task in `scraper/worker.py`, such as `scrape_newplatform`.
 3. Add the platform name to `PLATFORMS` in `backend/app/api/routes.py`.
@@ -215,7 +214,6 @@ scraper.worker.scrape_<platform>
 ```
 
 ## Notes
-
 - The backend auto-creates missing tables on startup.
 - The frontend talks to the backend through `/api`, which is proxied by Vite in development.
 - Scraping depends on the live structure and behavior of third-party websites, so individual scrapers may need updates if those sites change.
