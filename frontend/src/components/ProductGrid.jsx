@@ -1,51 +1,48 @@
 /**
- * ProductGrid — displays results grouped by platform side by side,
- * with a unit/size filter so users can compare the same pack size
- * across platforms for a fair price comparison.
+ * ProductGrid — the results area below the search bar.
  *
- * Layout:
- *   [ Filter by size: All sizes | 200 ml | 500 ml | 1 L ]
+ * Two display modes, switchable via a toggle button:
  *
- *   ┌── 🟢 Blinkit  9 items ──┐   ┌── 🟣 Zepto  7 items ──┐
- *   │  [card] [card] [card]   │   │  [card] [card] [card]  │
- *   │  [card] [card] ...      │   │  No 500 ml products    │
- *   └─────────────────────────┘   └────────────────────────┘
+ *   📊 Compare (default)
+ *      Matches the same product across platforms into one row so the user
+ *      can see at a glance which platform is cheapest.
  *
- * When a unit chip is selected, both columns update simultaneously so
- * the user sees only that size — making it easy to compare like-for-like.
- * If a platform has no products in the selected size, a short message is
- * shown so the user knows the platform simply doesn't carry that size.
+ *   ▦ By Platform
+ *      The original side-by-side columns view — one column per platform,
+ *      each card showing a single product. Useful for browsing all results.
+ *
+ * Both modes respect the unit filter chips so the user can narrow to a
+ * specific pack size (e.g. "1 L only") before comparing prices.
  */
 
 import { useState } from "react";
 import ProductCard from "./ProductCard";
 import UnitFilter from "./UnitFilter";
+import ComparisonTable from "./ComparisonTable";
 import { normalizeUnit, unitToBaseValue } from "../utils";
-
-// Display config per platform — add new ones here as scrapers are built
-const PLATFORM_META = {
-  blinkit:   { label: "Blinkit",          emoji: "🟢", accent: "#0f9e6e" },
-  zepto:     { label: "Zepto",            emoji: "🟣", accent: "#7c3aed" },
-  instamart: { label: "Swiggy Instamart", emoji: "🟠", accent: "#f97316" },
-};
+import { PLATFORM_META } from "../constants";
 
 export default function ProductGrid({ products, query }) {
-  // Which unit chip is selected — null means "All sizes"
+  // "comparison" shows the matched table; "columns" shows the platform columns
+  const [viewMode, setViewMode]       = useState("comparison");
   const [selectedUnit, setSelectedUnit] = useState(null);
 
-  // ── Build the sorted list of unique unit chips ───────────────────────────
-  // Collect normalised units from every product, deduplicate, then sort
-  // from smallest to largest so chips read "200 ml → 500 ml → 1 L → 2 L".
+  // ── Derived data ─────────────────────────────────────────────────────────
+
+  // Sorted unique normalised units for the filter chips
   const allUnits = [
     ...new Set(products.map((p) => normalizeUnit(p.unit)).filter(Boolean)),
   ].sort((a, b) => unitToBaseValue(a) - unitToBaseValue(b));
 
-  // ── Filter products by the selected unit ─────────────────────────────────
+  // All platforms that appear in this result set, in a stable order
+  const allPlatforms = [...new Set(products.map((p) => p.source).filter(Boolean))];
+
+  // Products filtered to the selected unit (used by the columns view and counts)
   const filteredProducts = selectedUnit
     ? products.filter((p) => normalizeUnit(p.unit) === selectedUnit)
     : products;
 
-  // ── Group filtered products by platform ──────────────────────────────────
+  // Group filtered products by platform (columns view only)
   const grouped = filteredProducts.reduce((acc, p) => {
     const key = p.source || "unknown";
     if (!acc[key]) acc[key] = [];
@@ -53,72 +50,96 @@ export default function ProductGrid({ products, query }) {
     return acc;
   }, {});
 
-  // Keep the original platform list so columns don't disappear when
-  // a filter is applied — instead, they show a "no results" message.
-  const allPlatforms = [
-    ...new Set(products.map((p) => p.source || "unknown")),
-  ];
-
-  const totalFiltered = filteredProducts.length;
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <section className="results-section">
 
-      {/* Summary line */}
-      <p className="results-meta">
-        <strong>{totalFiltered}</strong> result{totalFiltered !== 1 ? "s" : ""}{" "}
-        for <strong>"{query}"</strong> across{" "}
-        <strong>{allPlatforms.length}</strong> platform{allPlatforms.length !== 1 ? "s" : ""}
-        {selectedUnit && (
-          <span className="results-meta-filter"> — filtered to {selectedUnit}</span>
-        )}
-      </p>
+      {/* Header: summary + view toggle */}
+      <div className="results-header">
+        <p className="results-meta">
+          <strong>{filteredProducts.length}</strong>{" "}
+          result{filteredProducts.length !== 1 ? "s" : ""} for{" "}
+          <strong>"{query}"</strong> across{" "}
+          <strong>{allPlatforms.length}</strong>{" "}
+          platform{allPlatforms.length !== 1 ? "s" : ""}
+          {selectedUnit && (
+            <span className="results-meta-filter"> — {selectedUnit}</span>
+          )}
+        </p>
 
-      {/* Unit filter chips — hidden if all products have the same unit */}
+        <div className="view-toggle">
+          <button
+            className={`toggle-btn ${viewMode === "comparison" ? "toggle-btn--active" : ""}`}
+            onClick={() => setViewMode("comparison")}
+            title="Compare the same product across platforms"
+          >
+            📊 Compare
+          </button>
+          <button
+            className={`toggle-btn ${viewMode === "columns" ? "toggle-btn--active" : ""}`}
+            onClick={() => setViewMode("columns")}
+            title="See all results grouped by platform"
+          >
+            ▦ By Platform
+          </button>
+        </div>
+      </div>
+
+      {/* Unit / size filter chips */}
       <UnitFilter
         units={allUnits}
         selected={selectedUnit}
         onSelect={setSelectedUnit}
       />
 
-      {/* Side-by-side platform columns */}
-      <div className="platform-columns">
-        {allPlatforms.map((platform) => {
-          const meta  = PLATFORM_META[platform] || { label: platform, emoji: "🛒", accent: "#888" };
-          const items = grouped[platform] || [];
+      {/* ── Comparison table view (default) ── */}
+      {viewMode === "comparison" && (
+        <ComparisonTable
+          products={filteredProducts}
+          platforms={allPlatforms}
+        />
+      )}
 
-          return (
-            <div key={platform} className="platform-column">
+      {/* ── Platform columns view ── */}
+      {viewMode === "columns" && (
+        <div className="platform-columns">
+          {allPlatforms.map((platform) => {
+            const meta  = PLATFORM_META[platform] || { label: platform, emoji: "🛒", accent: "#888" };
+            const items = grouped[platform] || [];
 
-              {/* Column header */}
-              <div
-                className="platform-column-header"
-                style={{ borderTopColor: meta.accent }}
-              >
-                <span className="platform-emoji">{meta.emoji}</span>
-                <span className="platform-label">{meta.label}</span>
-                <span className="platform-item-count">
-                  {items.length} item{items.length !== 1 ? "s" : ""}
-                </span>
+            return (
+              <div key={platform} className="platform-column">
+
+                <div
+                  className="platform-column-header"
+                  style={{ borderTopColor: meta.accent }}
+                >
+                  <span className="platform-emoji">{meta.emoji}</span>
+                  <span className="platform-label">{meta.label}</span>
+                  <span className="platform-item-count">
+                    {items.length} item{items.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+
+                <div className="platform-product-grid">
+                  {items.length > 0 ? (
+                    items.map((p) => <ProductCard key={p.id} product={p} />)
+                  ) : (
+                    <p className="no-unit-results">
+                      {selectedUnit
+                        ? `No ${selectedUnit} products on ${meta.label}`
+                        : "No products found"}
+                    </p>
+                  )}
+                </div>
+
               </div>
+            );
+          })}
+        </div>
+      )}
 
-              {/* Product cards — or a helpful message if none match the filter */}
-              <div className="platform-product-grid">
-                {items.length > 0 ? (
-                  items.map((p) => <ProductCard key={p.id} product={p} />)
-                ) : (
-                  <p className="no-unit-results">
-                    {selectedUnit
-                      ? `No ${selectedUnit} products on ${meta.label}`
-                      : "No products found"}
-                  </p>
-                )}
-              </div>
-
-            </div>
-          );
-        })}
-      </div>
     </section>
   );
 }

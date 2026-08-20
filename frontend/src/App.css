@@ -146,10 +146,188 @@ body {
 
 /* ── Results section ── */
 .results-section { margin-top: 32px; }
+
+/* Header row: summary text + view toggle side by side */
+.results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 4px;
+}
 .results-meta {
   font-size: 0.9rem;
   color: #666;
-  margin-bottom: 16px;
+}
+
+/* ── View toggle (Compare / By Platform) ── */
+.view-toggle {
+  display: flex;
+  gap: 6px;
+}
+.toggle-btn {
+  padding: 6px 14px;
+  border: 1.5px solid #d0d5dd;
+  border-radius: 8px;
+  background: #fff;
+  color: #555;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.toggle-btn:hover:not(.toggle-btn--active) {
+  border-color: #0f9e6e;
+  color: #0f9e6e;
+}
+.toggle-btn--active {
+  background: #0f9e6e;
+  border-color: #0f9e6e;
+  color: #fff;
+}
+
+/* ── Comparison table ── */
+.comparison-table { margin-top: 20px; }
+
+.comparison-stats {
+  font-size: 0.88rem;
+  color: #666;
+  margin-bottom: 14px;
+}
+.comparison-stats-secondary { color: #94a3b8; }
+
+.comparison-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.comparison-section--muted { opacity: 0.75; }
+
+.comparison-section-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 24px 0 10px;
+}
+
+/* Anchor wrapper — removes link styling but keeps row clickable */
+.comparison-row-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+.comparison-row-link:hover .comparison-row { box-shadow: 0 3px 16px rgba(0,0,0,0.09); }
+
+/* ── Single comparison row ── */
+.comparison-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #fff;
+  border: 1px solid #e8ecf0;
+  border-radius: 14px;
+  padding: 14px 16px;
+  transition: box-shadow 0.18s;
+  flex-wrap: wrap;
+}
+/* Green left-border accent for rows found on multiple platforms */
+.comparison-row--multi  { border-left: 3px solid #0f9e6e; }
+.comparison-row--single { border-left: 3px solid #e2e8f0; }
+
+/* Product image */
+.comparison-img-wrap {
+  width: 60px;
+  height: 60px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f9f9f9;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.comparison-img-wrap img { width: 100%; height: 100%; object-fit: contain; }
+.comparison-img-placeholder { font-size: 1.6rem; }
+
+/* Product name + unit */
+.comparison-info {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.comparison-name { font-size: 0.88rem; font-weight: 500; color: #1a1a2e; line-height: 1.35; }
+.comparison-unit { font-size: 0.75rem; color: #94a3b8; }
+
+/* Price cells container */
+.comparison-prices {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* ── Individual platform price cell ── */
+.price-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 14px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  min-width: 96px;
+  text-align: center;
+  transition: border-color 0.15s;
+}
+/* Best deal cell */
+.price-cell--best {
+  border-width: 2px;
+  background: #f0fdf4;
+}
+/* Product not on this platform */
+.price-cell--na {
+  opacity: 0.4;
+  background: #fafafa;
+}
+.price-cell-platform {
+  font-size: 0.7rem;
+  color: #888;
+  white-space: nowrap;
+}
+.price-cell-amount {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+.price-cell-mrp {
+  font-size: 0.7rem;
+  color: #bbb;
+  text-decoration: line-through;
+}
+.price-cell-best-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  margin-top: 1px;
+}
+.price-cell-na {
+  font-size: 1rem;
+  color: #bbb;
+  font-weight: 300;
+}
+
+/* ── Responsive: stack prices below name on small screens ── */
+@media (max-width: 640px) {
+  .comparison-prices { margin-left: 0; width: 100%; }
+  .price-cell { flex: 1; min-width: 80px; }
+  .saving-callout { width: 100%; text-align: center; }
 }
 
 /* ── Product card ── */
